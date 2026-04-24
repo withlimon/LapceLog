@@ -10,39 +10,22 @@ on:
 permissions:
   contents: write
 
-# ─────────────────────────────────────────────────────────────────────────────
-# JOB 1 — Build tree-sitter grammars (matrix: Linux / macOS / Windows)
-# Uses only cc/gcc — available on all three runners with no setup required.
-# ─────────────────────────────────────────────────────────────────────────────
 jobs:
+# ─────────────────────────────────────────────────────────────────────────────
+# JOB 1 — Build tree-sitter grammars (Windows only, MinGW gcc/g++)
+# ─────────────────────────────────────────────────────────────────────────────
   build-grammars:
-    name: Build grammars (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            lib_prefix: lib
-            lib_ext: so
-            shared_flag: -shared
-
-          - os: macos-latest
-            lib_prefix: lib
-            lib_ext: dylib
-            shared_flag: -dynamiclib
-
-          - os: windows-latest
-            lib_prefix: ""
-            lib_ext: dll
-            shared_flag: -shared   # MinGW gcc supports -shared
+    name: Build grammars (Windows)
+    runs-on: windows-latest
 
     steps:
       - uses: actions/checkout@v4
 
-      # MinGW gcc is pre-installed on windows-latest; verify it is on PATH
-      - name: Verify compiler
-        run: gcc --version
+      - name: Verify compilers
+        shell: bash
+        run: |
+          gcc --version
+          g++ --version
 
       # ── Clone grammar sources ─────────────────────────────────────────
       - name: Clone grammar sources
@@ -52,44 +35,59 @@ jobs:
           git clone --depth 1 https://github.com/tree-sitter/tree-sitter-c       /tmp/ts-c
           git clone --depth 1 https://github.com/tree-sitter/tree-sitter-cpp     /tmp/ts-cpp
 
-      # ── Compile all three grammars ────────────────────────────────────
-      - name: Compile grammars
+      # ── Verilog (parser.c only, no external scanner) ──────────────────
+      - name: Compile tree-sitter-verilog
         shell: bash
         run: |
           mkdir -p grammars
-          PREFIX=${{ matrix.lib_prefix }}
-          EXT=${{ matrix.lib_ext }}
-          SHARED=${{ matrix.shared_flag }}
-
-          # Verilog / SystemVerilog
-          gcc $SHARED -fPIC -O2 \
+          gcc -shared -fPIC -O2 \
             /tmp/ts-verilog/src/parser.c \
             -I /tmp/ts-verilog/src \
-            -o grammars/${PREFIX}tree-sitter-verilog.${EXT}
+            -o grammars/tree-sitter-verilog.dll
 
-          # C
-          gcc $SHARED -fPIC -O2 \
+      # ── C (parser.c only, no external scanner) ────────────────────────
+      - name: Compile tree-sitter-c
+        shell: bash
+        run: |
+          gcc -shared -fPIC -O2 \
             /tmp/ts-c/src/parser.c \
             -I /tmp/ts-c/src \
-            -o grammars/${PREFIX}tree-sitter-c.${EXT}
+            -o grammars/tree-sitter-c.dll
 
-          # C++ (parser.c links against C parser)
-          gcc $SHARED -fPIC -O2 \
-            /tmp/ts-cpp/src/parser.c \
-            /tmp/ts-c/src/parser.c \
+      # ── C++ (parser.c + scanner.cc external scanner) ──────────────────
+      # tree-sitter-cpp has an external scanner written in C++ that
+      # provides the tree_sitter_cpp_external_scanner_* symbols.
+      # Compile scanner.cc with g++, then link everything together.
+      - name: Compile tree-sitter-cpp
+        shell: bash
+        run: |
+          # Compile the external scanner (C++)
+          g++ -c -fPIC -O2 \
+            /tmp/ts-cpp/src/scanner.cc \
             -I /tmp/ts-cpp/src \
-            -I /tmp/ts-c/src \
-            -o grammars/${PREFIX}tree-sitter-cpp.${EXT}
+            -o /tmp/scanner_cpp.o
+
+          # Compile the main parser (C)
+          gcc -c -fPIC -O2 \
+            /tmp/ts-cpp/src/parser.c \
+            -I /tmp/ts-cpp/src \
+            -o /tmp/parser_cpp.o
+
+          # Link both into a single DLL (use g++ to pull in C++ runtime)
+          g++ -shared -fPIC -O2 \
+            /tmp/parser_cpp.o \
+            /tmp/scanner_cpp.o \
+            -o grammars/tree-sitter-cpp.dll
 
       # ── Upload compiled grammars ──────────────────────────────────────
       - name: Upload grammar artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: grammars-${{ matrix.os }}
+          name: grammars-windows
           path: grammars/
 
 # ─────────────────────────────────────────────────────────────────────────────
-# JOB 2 — Pack & publish .volt archives (only on version tags)
+# JOB 2 — Pack & publish .volt archive (only on version tags)
 # ─────────────────────────────────────────────────────────────────────────────
   release:
     name: Pack & Release
@@ -100,37 +98,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download all grammar artifacts
+      - name: Download grammar artifacts
         uses: actions/download-artifact@v4
         with:
-          path: artifacts/
-
-      - name: Pack Linux .volt
-        run: |
-          mkdir -p pack-linux/grammars
-          cp artifacts/grammars-ubuntu-latest/*.so  pack-linux/grammars/
-          cp volt.toml                               pack-linux/
-          cd pack-linux && zip -r ../lapce-hdl-linux.volt .
-
-      - name: Pack macOS .volt
-        run: |
-          mkdir -p pack-macos/grammars
-          cp artifacts/grammars-macos-latest/*.dylib pack-macos/grammars/
-          cp volt.toml                                pack-macos/
-          cd pack-macos && zip -r ../lapce-hdl-macos.volt .
+          name: grammars-windows
+          path: grammars/
 
       - name: Pack Windows .volt
         run: |
-          mkdir -p pack-windows/grammars
-          cp artifacts/grammars-windows-latest/*.dll pack-windows/grammars/
-          cp volt.toml                                pack-windows/
-          cd pack-windows && zip -r ../lapce-hdl-windows.volt .
+          mkdir -p pack/grammars
+          cp grammars/*.dll pack/grammars/
+          cp volt.toml      pack/
+          cd pack && zip -r ../lapce-hdl-windows.volt .
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            lapce-hdl-linux.volt
-            lapce-hdl-macos.volt
-            lapce-hdl-windows.volt
+          files: lapce-hdl-windows.volt
           generate_release_notes: true
