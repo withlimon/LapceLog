@@ -12,7 +12,7 @@ permissions:
 
 jobs:
 # ─────────────────────────────────────────────────────────────────────────────
-# JOB 1 — Build tree-sitter grammars (Windows only, MinGW gcc/g++)
+# JOB 1 — Build tree-sitter grammars (Windows, MinGW gcc)
 # ─────────────────────────────────────────────────────────────────────────────
   build-grammars:
     name: Build grammars (Windows)
@@ -21,19 +21,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Verify compilers
+      - name: Verify compiler
         shell: bash
-        run: |
-          gcc --version
-          g++ --version
+        run: gcc --version
 
-      # ── Clone grammar sources ─────────────────────────────────────────
       - name: Clone grammar sources
         shell: bash
         run: |
-          git clone --depth 1 https://github.com/tree-sitter/tree-sitter-verilog /tmp/ts-verilog
-          git clone --depth 1 https://github.com/tree-sitter/tree-sitter-c       /tmp/ts-c
-          git clone --depth 1 https://github.com/tree-sitter/tree-sitter-cpp     /tmp/ts-cpp
+          git clone --depth 1 https://github.com/tree-sitter/tree-sitter-verilog ts-verilog
+          git clone --depth 1 https://github.com/tree-sitter/tree-sitter-c       ts-c
+          git clone --depth 1 https://github.com/tree-sitter/tree-sitter-cpp     ts-cpp
+
+      - name: List grammar src files
+        shell: bash
+        run: |
+          echo "=== ts-verilog/src ===" && ls ts-verilog/src/
+          echo "=== ts-c/src ==="       && ls ts-c/src/
+          echo "=== ts-cpp/src ==="     && ls ts-cpp/src/
 
       # ── Verilog (parser.c only, no external scanner) ──────────────────
       - name: Compile tree-sitter-verilog
@@ -41,8 +45,8 @@ jobs:
         run: |
           mkdir -p grammars
           gcc -shared -fPIC -O2 \
-            /tmp/ts-verilog/src/parser.c \
-            -I /tmp/ts-verilog/src \
+            ts-verilog/src/parser.c \
+            -I ts-verilog/src \
             -o grammars/tree-sitter-verilog.dll
 
       # ── C (parser.c only, no external scanner) ────────────────────────
@@ -50,36 +54,20 @@ jobs:
         shell: bash
         run: |
           gcc -shared -fPIC -O2 \
-            /tmp/ts-c/src/parser.c \
-            -I /tmp/ts-c/src \
+            ts-c/src/parser.c \
+            -I ts-c/src \
             -o grammars/tree-sitter-c.dll
 
-      # ── C++ (parser.c + scanner.cc external scanner) ──────────────────
-      # tree-sitter-cpp has an external scanner written in C++ that
-      # provides the tree_sitter_cpp_external_scanner_* symbols.
-      # Compile scanner.cc with g++, then link everything together.
+      # ── C++ (parser.c + scanner.c — both plain C, use gcc) ────────────
       - name: Compile tree-sitter-cpp
         shell: bash
         run: |
-          # Compile the external scanner (C++)
-          g++ -c -fPIC -O2 \
-            /tmp/ts-cpp/src/scanner.cc \
-            -I /tmp/ts-cpp/src \
-            -o /tmp/scanner_cpp.o
-
-          # Compile the main parser (C)
-          gcc -c -fPIC -O2 \
-            /tmp/ts-cpp/src/parser.c \
-            -I /tmp/ts-cpp/src \
-            -o /tmp/parser_cpp.o
-
-          # Link both into a single DLL (use g++ to pull in C++ runtime)
-          g++ -shared -fPIC -O2 \
-            /tmp/parser_cpp.o \
-            /tmp/scanner_cpp.o \
+          gcc -shared -fPIC -O2 \
+            ts-cpp/src/parser.c \
+            ts-cpp/src/scanner.c \
+            -I ts-cpp/src \
             -o grammars/tree-sitter-cpp.dll
 
-      # ── Upload compiled grammars ──────────────────────────────────────
       - name: Upload grammar artifacts
         uses: actions/upload-artifact@v4
         with:
