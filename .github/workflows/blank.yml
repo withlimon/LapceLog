@@ -1,0 +1,226 @@
+name: Build & Release
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*.*.*"]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+# ─────────────────────────────────────────────────────────────────────────────
+# JOB 1 — Lint (every push / PR)
+# ─────────────────────────────────────────────────────────────────────────────
+jobs:
+  lint:
+    name: Clippy + fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+          targets: wasm32-wasip1
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/
+          key: lint-${{ hashFiles('**/Cargo.lock') }}
+
+      - run: cargo fmt --check
+      - run: cargo clippy --target wasm32-wasip1 -- -D warnings
+
+# ─────────────────────────────────────────────────────────────────────────────
+# JOB 2 — Build WASI plugin + tree-sitter grammars (matrix: 3 OSes)
+# ─────────────────────────────────────────────────────────────────────────────
+  build:
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    needs: lint
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            grammar_out: libtree-sitter-verilog.so
+            grammar_c_out: libtree-sitter-c.so
+            grammar_cpp_out: libtree-sitter-cpp.so
+            volt_name: lapce-hdl-linux.volt
+            build_wasm: true         # compile .wasm once (shared binary)
+
+          - os: macos-latest
+            grammar_out: libtree-sitter-verilog.dylib
+            grammar_c_out: libtree-sitter-c.dylib
+            grammar_cpp_out: libtree-sitter-cpp.dylib
+            volt_name: lapce-hdl-macos.volt
+            build_wasm: false
+
+          - os: windows-latest
+            grammar_out: tree-sitter-verilog.dll
+            grammar_c_out: tree-sitter-c.dll
+            grammar_cpp_out: tree-sitter-cpp.dll
+            volt_name: lapce-hdl-windows.volt
+            build_wasm: false
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ── Rust toolchain ──────────────────────────────────────────────
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/
+          key: build-${{ matrix.os }}-${{ hashFiles('**/Cargo.lock') }}
+
+      # ── Build WASI plugin (Linux only — .wasm is cross-platform) ───
+      - name: Build WASI plugin
+        if: matrix.build_wasm
+        run: cargo build --release --target wasm32-wasip1
+
+      - name: Upload WASM artifact
+        if: matrix.build_wasm
+        uses: actions/upload-artifact@v4
+        with:
+          name: plugin-wasm
+          path: target/wasm32-wasip1/release/lapce_hdl.wasm
+
+      # ── Clone tree-sitter grammars ──────────────────────────────────
+      - name: Clone grammar sources (POSIX)
+        if: runner.os != 'Windows'
+        run: |
+          git clone --depth 1 https://github.com/tree-sitter/tree-sitter-verilog /tmp/ts-verilog
+          git clone --depth 1 https://github.com/tree-sitter/tree-sitter-c       /tmp/ts-c
+          git clone --depth 1 https://github.com/tree-sitter/tree-sitter-cpp     /tmp/ts-cpp
+
+      - name: Clone grammar sources (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          git clone --depth 1 https://github.com/tree-sitter/tree-sitter-verilog C:\ts-verilog
+          git clone --depth 1 https://github.com/tree-sitter/tree-sitter-c       C:\ts-c
+          git clone --depth 1 https://github.com/tree-sitter/tree-sitter-cpp     C:\ts-cpp
+
+      # ── Compile grammars (Linux / macOS) ───────────────────────────
+      - name: Compile grammars (POSIX)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p grammars
+
+          # Verilog / SystemVerilog
+          cc -shared -fPIC -O2 \
+             /tmp/ts-verilog/src/parser.c \
+             -I /tmp/ts-verilog/src \
+             -o grammars/${{ matrix.grammar_out }}
+
+          # C
+          cc -shared -fPIC -O2 \
+             /tmp/ts-c/src/parser.c \
+             -I /tmp/ts-c/src \
+             -o grammars/${{ matrix.grammar_c_out }}
+
+          # C++ (links against the C grammar object as tree-sitter-cpp depends on it)
+          cc -shared -fPIC -O2 \
+             /tmp/ts-cpp/src/parser.c \
+             /tmp/ts-c/src/parser.c \
+             -I /tmp/ts-cpp/src \
+             -I /tmp/ts-c/src \
+             -o grammars/${{ matrix.grammar_cpp_out }}
+
+      # ── Compile grammars (Windows / MSVC) ──────────────────────────
+      - name: Compile grammars (Windows)
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: |
+          mkdir grammars
+
+          cl /LD /O2 ^
+             C:\ts-verilog\src\parser.c ^
+             /I C:\ts-verilog\src ^
+             /Fe"grammars\${{ matrix.grammar_out }}"
+
+          cl /LD /O2 ^
+             C:\ts-c\src\parser.c ^
+             /I C:\ts-c\src ^
+             /Fe"grammars\${{ matrix.grammar_c_out }}"
+
+          cl /LD /O2 ^
+             C:\ts-cpp\src\parser.c ^
+             C:\ts-c\src\parser.c ^
+             /I C:\ts-cpp\src ^
+             /I C:\ts-c\src ^
+             /Fe"grammars\${{ matrix.grammar_cpp_out }}"
+
+      # ── Upload compiled grammars ────────────────────────────────────
+      - name: Upload grammar artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: grammars-${{ matrix.os }}
+          path: grammars/
+
+# ─────────────────────────────────────────────────────────────────────────────
+# JOB 3 — Pack & publish .volt archives (only on version tags)
+# ─────────────────────────────────────────────────────────────────────────────
+  release:
+    name: Pack & Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Download all artifacts produced by the build job
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      # ── Linux .volt ─────────────────────────────────────────────────
+      - name: Pack Linux .volt
+        run: |
+          mkdir -p pack-linux/bin pack-linux/grammars
+          cp artifacts/plugin-wasm/lapce_hdl.wasm  pack-linux/bin/lapce-hdl.wasm
+          cp artifacts/grammars-ubuntu-latest/*.so  pack-linux/grammars/
+          cp volt.toml                               pack-linux/
+          cd pack-linux && zip -r ../lapce-hdl-linux.volt .
+
+      # ── macOS .volt ─────────────────────────────────────────────────
+      - name: Pack macOS .volt
+        run: |
+          mkdir -p pack-macos/bin pack-macos/grammars
+          cp artifacts/plugin-wasm/lapce_hdl.wasm      pack-macos/bin/lapce-hdl.wasm
+          cp artifacts/grammars-macos-latest/*.dylib   pack-macos/grammars/
+          cp volt.toml                                  pack-macos/
+          cd pack-macos && zip -r ../lapce-hdl-macos.volt .
+
+      # ── Windows .volt ────────────────────────────────────────────────
+      - name: Pack Windows .volt
+        run: |
+          mkdir -p pack-windows/bin pack-windows/grammars
+          cp artifacts/plugin-wasm/lapce_hdl.wasm        pack-windows/bin/lapce-hdl.wasm
+          cp artifacts/grammars-windows-latest/*.dll     pack-windows/grammars/
+          cp volt.toml                                    pack-windows/
+          cd pack-windows && zip -r ../lapce-hdl-windows.volt .
+
+      # ── Create GitHub Release with all three .volt files ─────────────
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            lapce-hdl-linux.volt
+            lapce-hdl-macos.volt
+            lapce-hdl-windows.volt
+          generate_release_notes: true
