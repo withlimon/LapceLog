@@ -12,6 +12,7 @@ permissions:
 
 # ─────────────────────────────────────────────────────────────────────────────
 # JOB 1 — Build tree-sitter grammars (matrix: Linux / macOS / Windows)
+# Uses only cc/gcc — available on all three runners with no setup required.
 # ─────────────────────────────────────────────────────────────────────────────
 jobs:
   build-grammars:
@@ -22,88 +23,63 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            ext: so
-            prefix: lib
-            cc: cc
-            flags: -shared -fPIC -O2
+            lib_prefix: lib
+            lib_ext: so
+            shared_flag: -shared
 
           - os: macos-latest
-            ext: dylib
-            prefix: lib
-            cc: cc
-            flags: -shared -fPIC -O2
+            lib_prefix: lib
+            lib_ext: dylib
+            shared_flag: -dynamiclib
 
           - os: windows-latest
-            ext: dll
-            prefix: ""
-            cc: cl
-            flags: ""   # handled separately via shell: cmd
+            lib_prefix: ""
+            lib_ext: dll
+            shared_flag: -shared   # MinGW gcc supports -shared
 
     steps:
       - uses: actions/checkout@v4
 
-      # ── Clone all three grammars ──────────────────────────────────────
-      - name: Clone grammar sources (POSIX)
-        if: runner.os != 'Windows'
+      # MinGW gcc is pre-installed on windows-latest; verify it is on PATH
+      - name: Verify compiler
+        run: gcc --version
+
+      # ── Clone grammar sources ─────────────────────────────────────────
+      - name: Clone grammar sources
+        shell: bash
         run: |
           git clone --depth 1 https://github.com/tree-sitter/tree-sitter-verilog /tmp/ts-verilog
           git clone --depth 1 https://github.com/tree-sitter/tree-sitter-c       /tmp/ts-c
           git clone --depth 1 https://github.com/tree-sitter/tree-sitter-cpp     /tmp/ts-cpp
 
-      - name: Clone grammar sources (Windows)
-        if: runner.os == 'Windows'
-        run: |
-          git clone --depth 1 https://github.com/tree-sitter/tree-sitter-verilog C:\ts-verilog
-          git clone --depth 1 https://github.com/tree-sitter/tree-sitter-c       C:\ts-c
-          git clone --depth 1 https://github.com/tree-sitter/tree-sitter-cpp     C:\ts-cpp
-
-      # ── Compile (Linux / macOS) ───────────────────────────────────────
-      - name: Compile grammars (POSIX)
-        if: runner.os != 'Windows'
+      # ── Compile all three grammars ────────────────────────────────────
+      - name: Compile grammars
+        shell: bash
         run: |
           mkdir -p grammars
+          PREFIX=${{ matrix.lib_prefix }}
+          EXT=${{ matrix.lib_ext }}
+          SHARED=${{ matrix.shared_flag }}
 
-          ${{ matrix.cc }} ${{ matrix.flags }} \
+          # Verilog / SystemVerilog
+          gcc $SHARED -fPIC -O2 \
             /tmp/ts-verilog/src/parser.c \
             -I /tmp/ts-verilog/src \
-            -o grammars/${{ matrix.prefix }}tree-sitter-verilog.${{ matrix.ext }}
+            -o grammars/${PREFIX}tree-sitter-verilog.${EXT}
 
-          ${{ matrix.cc }} ${{ matrix.flags }} \
+          # C
+          gcc $SHARED -fPIC -O2 \
             /tmp/ts-c/src/parser.c \
             -I /tmp/ts-c/src \
-            -o grammars/${{ matrix.prefix }}tree-sitter-c.${{ matrix.ext }}
+            -o grammars/${PREFIX}tree-sitter-c.${EXT}
 
-          # tree-sitter-cpp depends on the C parser object
-          ${{ matrix.cc }} ${{ matrix.flags }} \
+          # C++ (parser.c links against C parser)
+          gcc $SHARED -fPIC -O2 \
             /tmp/ts-cpp/src/parser.c \
             /tmp/ts-c/src/parser.c \
             -I /tmp/ts-cpp/src \
             -I /tmp/ts-c/src \
-            -o grammars/${{ matrix.prefix }}tree-sitter-cpp.${{ matrix.ext }}
-
-      # ── Compile (Windows / MSVC) ──────────────────────────────────────
-      - name: Compile grammars (Windows)
-        if: runner.os == 'Windows'
-        shell: cmd
-        run: |
-          mkdir grammars
-
-          cl /LD /O2 ^
-            C:\ts-verilog\src\parser.c ^
-            /I C:\ts-verilog\src ^
-            /Fe"grammars\tree-sitter-verilog.dll"
-
-          cl /LD /O2 ^
-            C:\ts-c\src\parser.c ^
-            /I C:\ts-c\src ^
-            /Fe"grammars\tree-sitter-c.dll"
-
-          cl /LD /O2 ^
-            C:\ts-cpp\src\parser.c ^
-            C:\ts-c\src\parser.c ^
-            /I C:\ts-cpp\src ^
-            /I C:\ts-c\src ^
-            /Fe"grammars\tree-sitter-cpp.dll"
+            -o grammars/${PREFIX}tree-sitter-cpp.${EXT}
 
       # ── Upload compiled grammars ──────────────────────────────────────
       - name: Upload grammar artifacts
@@ -132,22 +108,22 @@ jobs:
       - name: Pack Linux .volt
         run: |
           mkdir -p pack-linux/grammars
-          cp artifacts/grammars-ubuntu-latest/*.so pack-linux/grammars/
-          cp volt.toml pack-linux/
+          cp artifacts/grammars-ubuntu-latest/*.so  pack-linux/grammars/
+          cp volt.toml                               pack-linux/
           cd pack-linux && zip -r ../lapce-hdl-linux.volt .
 
       - name: Pack macOS .volt
         run: |
           mkdir -p pack-macos/grammars
           cp artifacts/grammars-macos-latest/*.dylib pack-macos/grammars/
-          cp volt.toml pack-macos/
+          cp volt.toml                                pack-macos/
           cd pack-macos && zip -r ../lapce-hdl-macos.volt .
 
       - name: Pack Windows .volt
         run: |
           mkdir -p pack-windows/grammars
           cp artifacts/grammars-windows-latest/*.dll pack-windows/grammars/
-          cp volt.toml pack-windows/
+          cp volt.toml                                pack-windows/
           cd pack-windows && zip -r ../lapce-hdl-windows.volt .
 
       - name: Publish GitHub Release
